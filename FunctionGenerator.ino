@@ -13,7 +13,7 @@
 #define EP(x) [x] = #x
 
 // Save settings to EEPROM and recover them at start-up
-#define ENABLE_EEPROM
+// #define ENABLE_EEPROM
 
 // Apply freq. value "on the fly" with 0.4s delay
 #define RUNNING_FREQUENCY
@@ -23,7 +23,7 @@
 #define EEPROM_ADDRESS_SHIFT 0x00
 
 // Enable Gyver watchdog
-#define ENABLE_WATCHDOG
+// #define ENABLE_WATCHDOG
 
 #include <MD_AD9833.h>
 #include <LiquidCrystal_I2C.h>
@@ -45,6 +45,11 @@
 
 #define FSYNC 10
 
+// LCD related settings
+#define LCD_I2C_ADDR 0x27
+#define LCD_COLS 16
+#define LCD_ROWS 2
+
 const char *verStr = "v2.0";
 const char *loadMsgT = "Function";
 const char *loadMsgB = "Generator";
@@ -62,50 +67,43 @@ unsigned int encFreqStep = 1000;
 // otherwise individual areas are seperately updated.
 unsigned char isDispDirty = 1;
 
-typedef enum Waveform : unsigned char
+enum Waveform : byte
 {
-  SIN = 0,
-  CLK,
-  TRI
+   SIN,
+   CLK,
+   TRI
 };
 
-typedef enum OutputStatus : unsigned char
+enum OutputStatus : byte
 {
-  OFF = 0,
-  ON
+   OFF,
+   ON
 };
 
-typedef enum MenuItem : unsigned char
+enum MenuItem : byte
 {
-  Function = 0,
-  Frequency,
-  Phase,
-  Version
+   Function,
+   Frequency,
+   Phase,
+   Version
 };
 
-typedef enum DisplayFrame : unsigned char
+enum DisplayFrame : byte
 {
-  HOME_PAGE = 0,
-  MENU,
-  SETTING
+   HOME_PAGE,
+   MENU,
+   SETTING
 };
 
 // Character arrays used on the LCD
 const char *waveformStr[3] = {EP(SIN), EP(CLK), EP(TRI)};
 const char *outputStatStr[2] = {EP(OFF), EP(ON)};
 const char *menuItmStr[4] = {EP(Function), EP(Frequency), EP(Phase), EP(Version)};
-const char *memBanks[3] = {"MEM-A", "MEM-B", "CUST"};
-const unsigned long memBankFreqs[2] = {10000, 500000};
-
-// Loaded from the settings struct
-Waveform curWaveform;
-unsigned long curFreq;
+const char *channelStr[2] = {"CH-1", "CH-2"};
+const unsigned long channelFreqs[2] = {10000, 500000};
 
 // Whether function output is turned on
-OutputStatus curOutputStat = OFF;
-
-// Stores the current memory bank slot
-unsigned char curMemBank = 0;
+OutputStatus outputStat = OFF;
 
 // Currently selected menu item
 MenuItem curMenuSel = Function;
@@ -125,66 +123,72 @@ DisplayFrame curDispFrame = HOME_PAGE;
 /**
  * Structure to hold EEPROM settings if EEPROM is enabled
  */
-struct settings
+struct Settings
 {
-  unsigned long freq[2];
-  unsigned char waveform;
-  bool channel;
-  uint8_t checksum;
+   unsigned long frequency[2];
+   Waveform waveform[2];
+   bool channel;
+   byte checksum;
 #ifdef ENABLE_EEPROM
 } settings;
 #else
-} settings = {memBankFreqs[0], memBankFreqs[1], SIN, 0, 0};
+} settings = {channelFreqs[0], channelFreqs[1], SIN, SIN, 0, 0};
 #endif
 
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 RotaryEncoder enc(ROT_B, ROT_A, RotaryEncoder::LatchMode::FOUR0);
 OneButton encBtn(ROT_PB, true, true);
 MD_AD9833 sigGen(FSYNC);
 
 void setup()
 {
-  lcd.init();
-  lcd.backlight();
-  lcd.createChar(0, arrowLeft);
-  lcd.createChar(1, arrowRight);
+   lcd.init();
+   lcd.backlight();
+   lcd.createChar(0, arrowLeft);
+   lcd.createChar(1, arrowRight);
 
-  // Add interrupts for encoder A and B pins
-  attachInterrupt(digitalPinToInterrupt(ROT_A), checkPosition, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ROT_B), checkPosition, CHANGE);
+   // Add interrupts for encoder A and B pins
+   attachInterrupt(digitalPinToInterrupt(ROT_A), checkPosition, CHANGE);
+   attachInterrupt(digitalPinToInterrupt(ROT_B), checkPosition, CHANGE);
 
-  // Add event handlers for encoder button
-  encBtn.attachClick(encPress);
-  encBtn.attachDoubleClick(encDoublePress);
-  encBtn.attachLongPressStart(encLongPress);
+   // Add event handlers for encoder button
+   encBtn.attachClick(encPress);
+   encBtn.attachDoubleClick(encDoublePress);
+   encBtn.attachLongPressStart(encLongPress);
 
-  showStartScreen();
-
-  sigGen.begin();
-
-#ifdef ENABLE_WATCHDOG
-  // Enable watchdog with 2s timeout
-  Watchdog.enable(RESET_MODE, WDT_PRESCALER_256);
+#ifdef ENABLE_EEPROM
+   readFromEEPROM();
 #endif
 
-  Serial.begin(9600);
+   showStartScreen();
+
+   sigGen.begin();
+
+#ifdef ENABLE_WATCHDOG
+   // Enable watchdog with 2s timeout
+   Watchdog.enable(RESET_MODE, WDT_PRESCALER_256);
+#endif
+
+   Serial.begin(115200);
 }
 
 void loop()
 {
-  encBtn.tick();
+   Serial.print(settings.frequency[0]);
 
-  static int encPos = 0;
-  int newPos = enc.getPosition();
-  if (encPos != newPos)
-  {
-    encRotate();
+   encBtn.tick();
 
-    encPos = newPos;
-  }
+   static int encPos = 0;
+   int newPos = enc.getPosition();
+   if (encPos != newPos)
+   {
+      encRotate();
 
-  if (isDispDirty)
-    updateDisplay();
+      encPos = newPos;
+   }
+
+   if (isDispDirty)
+      updateDisplay();
 }
 
 /**
@@ -192,16 +196,16 @@ void loop()
  */
 void showStartScreen()
 {
-  lcd.setCursor(4, 0);
-  lcd.print(loadMsgT);
-  lcd.setCursor(1, 1);
-  lcd.print(loadMsgB);
-  lcd.print(' ');
-  lcd.print(verStr);
+   lcd.setCursor(4, 0);
+   lcd.print(loadMsgT);
+   lcd.setCursor(1, 1);
+   lcd.print(loadMsgB);
+   lcd.print(' ');
+   lcd.print(verStr);
 
-  delay(2000);
+   delay(2000);
 
-  lcd.clear();
+   lcd.clear();
 }
 
 /**
@@ -209,16 +213,16 @@ void showStartScreen()
  */
 void showHome()
 {
-  lcd.setCursor(0, 0);
-  lcd.print("F=");
-  printFreq();
+   lcd.setCursor(0, 0);
+   lcd.print("F=");
+   printFreq();
 
-  printOutputStat();
+   printOutputStat();
 
-  printCurMemBank();
+   printChannel();
 
-  lcd.setCursor(13, 1);
-  lcd.print(waveformStr[curWaveform]);
+   lcd.setCursor(13, 1);
+   lcd.print(waveformStr[settings.waveform[settings.channel]]);
 }
 
 /**
@@ -226,24 +230,24 @@ void showHome()
  */
 void showMenu()
 {
-  // Remove blink in case comming from the settings.
-  lcd.noBlink();
+   // Remove blink in case comming from the settings.
+   lcd.noBlink();
 
-  printOnCenter(menuItmStr[curMenuSel], 0);
+   printOnCenter(menuItmStr[curMenuSel], 0);
 
-  unsigned int arrLen = sizeof(menuItmStr) / sizeof(char *);
+   unsigned int arrLen = sizeof(menuItmStr) / sizeof(char *);
 
-  if (curMenuSel > 0)
-  {
-    lcd.setCursor(0, 0);
-    lcd.write(0);
-  }
+   if (curMenuSel > 0)
+   {
+      lcd.setCursor(0, 0);
+      lcd.write(0);
+   }
 
-  if (curMenuSel < arrLen - 1)
-  {
-    lcd.setCursor(15, 0);
-    lcd.write(1);
-  }
+   if (curMenuSel < arrLen - 1)
+   {
+      lcd.setCursor(15, 0);
+      lcd.write(1);
+   }
 }
 
 /**
@@ -251,44 +255,48 @@ void showMenu()
  */
 void showSetting()
 {
-  switch (curMenuSel)
-  {
-  case 0:
-    lcd.setCursor(0, 0);
-    lcd.print(waveformStr[0]);
-    printOnCenter(waveformStr[1], 0);
-    printOnRight(waveformStr[2], 0);
-
-    if (curWaveform == 0)
+   switch (curMenuSel)
+   {
+   case 0:
       lcd.setCursor(0, 0);
-    else if (curWaveform == 1)
-      lcd.setCursor(7, 0);
-    else
-      lcd.setCursor(13, 0);
+      lcd.print(waveformStr[0]);
+      printOnCenter(waveformStr[1], 0);
+      printOnRight(waveformStr[2], 0);
 
-    lcd.blink();
+      Waveform curWaveform = settings.waveform[settings.channel];
 
-    break;
-  case 1:
-    for (int i = 0; i < 2; i++)
-    {
-      lcd.setCursor(0, i);
-      lcd.print(memBanks[i]);
-      lcd.print(" ");
-      lcd.print(memBankFreqs[i]);
-      lcd.print(" ");
-      lcd.print(freqUnit);
-    }
+      if (curWaveform == 0)
+         lcd.setCursor(0, 0);
+      else if (curWaveform == 1)
+         lcd.setCursor(7, 0);
+      else
+         lcd.setCursor(13, 0);
 
-    lcd.setCursor(0, 0);
-    lcd.blink();
+      lcd.blink();
 
-    break;
-  case 3:
-    printOnCenter((char *)verStr, 0);
+      break;
+   case 1:
+      unsigned short len = sizeof(channelStr) / sizeof(char *);
 
-    break;
-  }
+      for (int i = 0; i < len; i++)
+      {
+         lcd.setCursor(0, i);
+         lcd.print(channelStr[i]);
+         lcd.print(" ");
+         lcd.print(settings.frequency[i]);
+         lcd.print(" ");
+         lcd.print(freqUnit);
+      }
+
+      lcd.setCursor(0, 0);
+      lcd.blink();
+
+      break;
+   case 3:
+      printOnCenter((char *)verStr, 0);
+
+      break;
+   }
 }
 
 /**
@@ -296,25 +304,25 @@ void showSetting()
  */
 void updateDisplay()
 {
-  lcd.clear();
+   lcd.clear();
 
-  switch (curDispFrame)
-  {
-  case 0:
-    showHome();
+   switch (curDispFrame)
+   {
+   case DisplayFrame::HOME_PAGE:
+      showHome();
 
-    break;
-  case 1:
-    showMenu();
+      break;
+   case DisplayFrame::MENU:
+      showMenu();
 
-    break;
-  case 2:
-    showSetting();
+      break;
+   case DisplayFrame::SETTING:
+      showSetting();
 
-    break;
-  }
+      break;
+   }
 
-  isDispDirty = 0;
+   isDispDirty = 0;
 }
 
 /**
@@ -322,15 +330,15 @@ void updateDisplay()
  */
 void printFreq()
 {
-  for (int i = 2; i < 11; i++)
-  {
-    lcd.setCursor(i, 0);
-    lcd.print(" ");
-  }
+   for (int i = 2; i < 11; i++)
+   {
+      lcd.setCursor(i, 0);
+      lcd.print(" ");
+   }
 
-  lcd.setCursor(2, 0);
-  lcd.print(curFreq);
-  lcd.print(freqUnit);
+   lcd.setCursor(2, 0);
+   lcd.print(settings.frequency[settings.channel]);
+   lcd.print(freqUnit);
 }
 
 /**
@@ -338,29 +346,29 @@ void printFreq()
  */
 void printOutputStat()
 {
-  for (int i = 13; i < 16; i++)
-  {
-    lcd.setCursor(i, 0);
-    lcd.print(" ");
-  }
+   for (int i = 13; i < 16; i++)
+   {
+      lcd.setCursor(i, 0);
+      lcd.print(" ");
+   }
 
-  lcd.setCursor(13, 0);
-  lcd.print(outputStatStr[curOutputStat]);
+   lcd.setCursor(13, 0);
+   lcd.print(outputStatStr[outputStat]);
 }
 
 /**
  * Print currently selected membank on main screen
  */
-void printCurMemBank()
+void printChannel()
 {
-  for (int i = 0; i < 5; i++)
-  {
-    lcd.setCursor(i, 1);
-    lcd.print(" ");
-  }
+   for (int i = 0; i < 5; i++)
+   {
+      lcd.setCursor(i, 1);
+      lcd.print(" ");
+   }
 
-  lcd.setCursor(0, 1);
-  lcd.print(memBanks[curMemBank]);
+   lcd.setCursor(0, 1);
+   lcd.print(channelStr[settings.channel]);
 }
 
 /**
@@ -368,7 +376,7 @@ void printCurMemBank()
  */
 void checkPosition()
 {
-  enc.tick();
+   enc.tick();
 }
 
 /**
@@ -376,24 +384,27 @@ void checkPosition()
  */
 void encPress()
 {
-  switch (curDispFrame)
-  {
-  case 0:
-    curOutputStat = !curOutputStat;
-    printOutputStat();
+   switch (curDispFrame)
+   {
+   case HOME_PAGE:
+      outputStat = !outputStat;
 
-    break;
-  case 1:
-    curDispFrame = 2;
-    isDispDirty = 1;
+      // Turn the AD9833 module on or off
+      sigGen.setModeSD(outputStat ? MD_AD9833::MODE_ON : MD_AD9833::MODE_OFF); 
+      printOutputStat();
 
-    break;
-  case 2:
-    curDispFrame = 1;
-    isDispDirty = 1;
+      break;
+   case MENU:
+      curDispFrame = SETTING;
+      isDispDirty = 1;
 
-    break;
-  }
+      break;
+   case SETTING:
+      curDispFrame = HOME_PAGE;
+      isDispDirty = 1;
+
+      break;
+   }
 }
 
 /**
@@ -401,21 +412,16 @@ void encPress()
  */
 void encDoublePress()
 {
-  switch (curDispFrame)
-  {
-  case 0:
-    if (curMemBank < 1)
-      curMemBank++;
-    else
-      curMemBank = 0;
+   switch (curDispFrame)
+   {
+   case HOME_PAGE:
+      settings.channel = !settings.channel;
 
-    curFreq = memBankFreqs[curMemBank];
+      printFreq();
+      printChannel();
 
-    printFreq();
-    printCurMemBank();
-
-    break;
-  }
+      break;
+   }
 }
 
 /**
@@ -423,19 +429,19 @@ void encDoublePress()
  */
 void encLongPress()
 {
-  switch (curDispFrame)
-  {
-  case 0:
-    curDispFrame = 1;
+   switch (curDispFrame)
+   {
+   case HOME_PAGE:
+      curDispFrame = MENU;
 
-    break;
-  case 1:
-    curDispFrame = 0;
+      break;
+   case MENU:
+      curDispFrame = HOME_PAGE;
 
-    break;
-  }
+      break;
+   }
 
-  isDispDirty = 1;
+   isDispDirty = 1;
 }
 
 /**
@@ -443,120 +449,119 @@ void encLongPress()
  */
 void encRotate()
 {
-  int rotDir = ((int)enc.getDirection());
+   RotaryEncoder::Direction rotDir = enc.getDirection();
 
-  if (curDispFrame == 0)
-  {
-    if (rotDir < 0)
-    {
-      long newFreq = curFreq + encFreqStep;
+   // Set a pointer to the frequency for the current channel
+   long *curFreq = &settings.frequency[settings.channel];
 
-      if (newFreq < maxFreq)
-        curFreq = newFreq;
-      else
-        curFreq = maxFreq;
-    }
-    else
-    {
-      long newFreq = curFreq - encFreqStep;
-
-      if (newFreq > 0)
-        curFreq = newFreq;
-      else
-        curFreq = 0;
-    }
-
-    if (curFreq != maxFreq || curFreq != 0)
-      printFreq();
-
-    // Update the memory bank to custom if its already not set
-    if (curMemBank != 2)
-    {
-      curMemBank = 2;
-      printCurMemBank();
-    }
-  }
-  else if (curDispFrame == 1)
-  {
-    unsigned int arrLen = sizeof(menuItems) / sizeof(char *);
-
-    if (rotDir < 0)
-    {
-      if (curMenuSel < arrLen - 1)
-        curMenuSel++;
-      else
-        curMenuSel = arrLen - 1;
-    }
-    else
-    {
-      if (curMenuSel > 0)
-        curMenuSel--;
-      else
-        curMenuSel = 0;
-    }
-
-    isDispDirty = 1;
-  }
-  else if (curDispFrame == 2)
-  {
-    switch (curMenuSel)
-    {
-    case 0:
-      if (curWaveform == 0)
+   if (curDispFrame == HOME_PAGE)
+   {
+      if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
       {
-        if (rotDir < 0)
-        {
-          lcd.setCursor(7, 0);
-          lcd.blink();
+         long newFreq = *curFreq + encFreqStep;
 
-          curWaveform = 1;
-        }
-        else
-        {
-          lcd.setCursor(13, 0);
-          lcd.blink();
-
-          curWaveform = 2;
-        }
+         if (newFreq < maxFreq)
+            *curFreq = newFreq;
+         else
+            *curFreq = maxFreq;
       }
-      else if (curWaveform == 1)
+      else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
       {
-        if (rotDir < 0)
-        {
-          lcd.setCursor(13, 0);
-          lcd.blink();
+         long newFreq = *curFreq - encFreqStep;
 
-          curWaveform = 2;
-        }
-        else
-        {
-          lcd.setCursor(0, 0);
-          lcd.blink();
-
-          curWaveform = 0;
-        }
-      }
-      else
-      {
-        if (rotDir < 0)
-        {
-          lcd.setCursor(0, 0);
-          lcd.blink();
-
-          curWaveform = 0;
-        }
-        else
-        {
-          lcd.setCursor(7, 0);
-          lcd.blink();
-
-          curWaveform = 1;
-        }
+         if (newFreq > 0)
+            *curFreq = newFreq;
+         else
+            *curFreq = 0;
       }
 
-      break;
-    }
-  }
+      if (curFreq != maxFreq || curFreq != 0)
+         printFreq();
+   }
+   else if (curDispFrame == MENU)
+   {
+      unsigned int arrLen = sizeof(menuItmStr) / sizeof(char *);
+
+      if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
+      {
+         if (curMenuSel < arrLen - 1)
+            curMenuSel = (MenuItem)(curMenuSel + 1);
+         else
+            curMenuSel = (MenuItem)(arrLen - 1);
+      }
+      else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
+      {
+         if (curMenuSel > 0)
+            curMenuSel = (MenuItem)(curMenuSel + 1);
+         else
+            curMenuSel = Function;
+      }
+
+      isDispDirty = 1;
+   }
+   else if (curDispFrame == SETTING)
+   {
+      switch (curMenuSel)
+      {
+      case Function:
+         // Fetch the waveform for the current channel
+         Waveform curWaveform = settings.waveform[settings.channel];
+
+         if (curWaveform == SIN)
+         {
+            if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
+            {
+               lcd.setCursor(7, 0);
+               lcd.blink();
+
+               curWaveform = CLK;
+            }
+            else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
+            {
+               lcd.setCursor(13, 0);
+               lcd.blink();
+
+               curWaveform = TRI;
+            }
+         }
+         else if (curWaveform == CLK)
+         {
+            if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
+            {
+               lcd.setCursor(13, 0);
+               lcd.blink();
+
+               curWaveform = TRI;
+            }
+            else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
+            {
+               lcd.setCursor(0, 0);
+               lcd.blink();
+
+               curWaveform = SIN;
+            }
+         }
+         else
+         {
+            if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
+            {
+               lcd.setCursor(0, 0);
+               lcd.blink();
+
+               curWaveform = SIN;
+            }
+            else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
+            {
+               lcd.setCursor(7, 0);
+               lcd.blink();
+
+               curWaveform = CLK;
+            }
+         }
+
+         break;
+      }
+   }
 }
 
 /**
@@ -567,11 +572,11 @@ void encRotate()
  */
 void printOnRight(const char *text, unsigned int row)
 {
-  unsigned int txtLen = strlen(text);
-  unsigned int startPos = 16 - txtLen;
+   unsigned int txtLen = strlen(text);
+   unsigned int startPos = LCD_COLS - txtLen;
 
-  lcd.setCursor(startPos, row);
-  lcd.print(text);
+   lcd.setCursor(startPos, row);
+   lcd.print(text);
 }
 
 /**
@@ -582,9 +587,144 @@ void printOnRight(const char *text, unsigned int row)
  */
 void printOnCenter(const char *text, unsigned int row)
 {
-  unsigned int txtLen = strlen(text);
-  unsigned int startPos = 8 - (txtLen / 2);
+   unsigned int txtLen = strlen(text);
+   unsigned int startPos = (LCD_COLS / 2) - (txtLen / 2);
 
-  lcd.setCursor(startPos, row);
-  lcd.print(text);
+   lcd.setCursor(startPos, row);
+   lcd.print(text);
+}
+
+/**
+ * Read settings from the EEPROM.
+ *
+ * @return true If CRC checksum is OK
+ * @return false If CRC checksum fails
+ */
+bool readFromEEPROM()
+{
+   eeprom_read_block((void *)&settings, EEPROM_ADDRESS_SHIFT, sizeof(Settings));
+
+   // Check the CRC8 checksum of the read memory block
+   // Last enum member is a byte of checksum, so passing one less byte
+   byte checksum = crc8block((byte *)&settings, sizeof(Settings) - 1);
+   if (checksum == settings.checksum)
+      return true;
+
+   return false;
+}
+
+/**
+ * Write settings to EEPROM.
+ */
+void writeToEEPROM()
+{
+   // Calculate CRC8 checksum and save it with the settings
+   byte checksum = crc8block((byte *)&settings, sizeof(Settings) - 1);
+
+   settings.checksum = checksum;
+
+   eeprom_update_block((void *)&settings, EEPROM_ADDRESS_SHIFT, sizeof(Settings));
+}
+
+/**
+ * Generate a CRC8 checksum using the given memory block.
+ *
+ * @param pcBlock Memory block to be used
+ * @param len Length of memory block
+ * @return unsigned char Generated CRC8 block
+ */
+unsigned char crc8block(byte *pcBlock, unsigned short len)
+{
+   byte crc = 0xFF;
+   byte i;
+
+   while (len--)
+   {
+      crc ^= *pcBlock++;
+      for (i = 0; i < 8; i++)
+         crc = (crc & 0x80) ? (crc << 1) ^ 0x31 : crc << 1;
+   }
+
+   return crc;
+}
+
+/**
+ * Blinks the LED backlight
+ *
+ * @param nBlinks No of blinks
+ */
+void blinkDisplayBacklight(const byte nBlinks)
+{
+   for (byte i = 0; i < nBlinks; i++)
+   {
+      lcd.noBacklight();
+      _delay_ms(300);
+
+      lcd.backlight();
+      _delay_ms(300);
+   }
+}
+
+/**
+ * Set the waveform on the AD9833 device
+ *
+ * @param curMode Current waveform selected
+ */
+void setADSigMode(const Waveform curMode)
+{
+   switch (curMode)
+   {
+   case SIN:
+      sigGen.setMode(MD_AD9833::mode_t::MODE_SINE);
+
+      break;
+   case CLK:
+      sigGen.setMode(MD_AD9833::mode_t::MODE_SQUARE1);
+
+      break;
+   case TRI:
+      sigGen.setMode(MD_AD9833::mode_t::MODE_TRIANGLE);
+
+      break;
+   }
+}
+
+/**
+ * Set the frequency on the AD9833 device
+ *
+ * @param channel Channel to affect on the device
+ * @param freq Currently selected frequency
+ */
+void setADFreq(const bool channel, const unsigned long freq)
+{
+   sigGen.setFrequency(channel ? MD_AD9833::channel_t::CHAN_1 : MD_AD9833::channel_t::CHAN_0, freq);
+}
+
+/**
+ * Set the channel on the AD9833 device
+ *
+ * @param channel Channel to change to
+ */
+void setADChannel(const bool channel)
+{
+   if (channel)
+   {
+      sigGen.setActiveFrequency(MD_AD9833::channel_t::CHAN_1);
+   }
+   else
+   {
+      sigGen.setActiveFrequency(MD_AD9833::channel_t::CHAN_0);
+   }
+}
+
+/**
+ * Apply the current settings to the AD9833 device
+ *
+ */
+void applyCurrentSettings()
+{
+   setADFreq(0, settings.frequency[0]);
+   setADFreq(1, settings.frequency[1]);
+   setADSigMode(settings.waveform[settings.channel]);
+   setADChannel(settings.channel);
 }

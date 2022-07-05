@@ -23,12 +23,13 @@
 #define EEPROM_ADDRESS_SHIFT 0x00
 
 // Enable Gyver watchdog
-// #define ENABLE_WATCHDOG
+#define ENABLE_WATCHDOG
 
 #include <MD_AD9833.h>
 #include <LiquidCrystal_I2C.h>
 #include <RotaryEncoder.h>
 #include <OneButton.h>
+#include <math.h>
 
 #ifdef ENABLE_EEPROM
 #include <avr/eeprom.h>
@@ -39,8 +40,8 @@
 #include <avr/wdt.h>
 #endif
 
-#define ROT_B 2
-#define ROT_A 3
+#define ROT_A 2
+#define ROT_B 3
 #define ROT_PB 4
 
 #define FSYNC 10
@@ -60,6 +61,7 @@ byte arrowLeft[] = {B00000, B00000, B00100, B01000, B11111, B01000, B00100, B000
 byte arrowRight[] = {B00000, B00000, B00100, B00010, B11111, B00010, B00100, B00000};
 
 unsigned long maxFreq = 1000000;
+unsigned long maxFreqStep = 100000;
 unsigned int encFreqStep = 1000;
 
 // Whether the display needs to be redrawn
@@ -120,23 +122,27 @@ unsigned long lastFreqUpdate;
 // Currently selected display frame
 DisplayFrame curDispFrame = HOME_PAGE;
 
+// Holds LCD cursor row posion
+byte curRow = 0;
+
 /**
  * Structure to hold EEPROM settings if EEPROM is enabled
  */
 struct Settings
 {
    unsigned long frequency[2];
+   unsigned long freqStep;
    Waveform waveform[2];
    bool channel;
    byte checksum;
 #ifdef ENABLE_EEPROM
 } settings;
 #else
-} settings = {channelFreqs[0], channelFreqs[1], SIN, SIN, 0, 0};
+} settings = {channelFreqs[0], channelFreqs[1], encFreqStep, SIN, SIN, 0, 0};
 #endif
 
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
-RotaryEncoder enc(ROT_B, ROT_A, RotaryEncoder::LatchMode::FOUR0);
+RotaryEncoder enc(ROT_B, ROT_A, RotaryEncoder::LatchMode::TWO03);
 OneButton encBtn(ROT_PB, true, true);
 MD_AD9833 sigGen(FSYNC);
 
@@ -157,7 +163,31 @@ void setup()
    encBtn.attachLongPressStart(encLongPress);
 
 #ifdef ENABLE_EEPROM
-   readFromEEPROM();
+   bool resetSettings = false;
+
+   if (!readFromEEPROM())
+   {
+      lcd.setCursor(0, 0);
+      lcd.print(F("Error:CRC EEPROM"));
+      printResetMsg(1);
+
+      _delay_ms(3000);
+
+      resetSettings = true;
+
+      lcd.clear();
+   }
+
+   if (resetSettings)
+   {
+      resetSettings();
+      writeToEEPROM();
+   }
+
+   setADFreq(0, settings.frequency[0]);
+   setADFreq(1, settings.frequency[1]);
+   setADSigMode(settings.waveform[settings.channel]);
+   setADChannel(settings.channel);
 #endif
 
    showStartScreen();
@@ -174,8 +204,6 @@ void setup()
 
 void loop()
 {
-   Serial.print(settings.frequency[0]);
-
    encBtn.tick();
 
    static int encPos = 0;
@@ -189,6 +217,11 @@ void loop()
 
    if (isDispDirty)
       updateDisplay();
+
+#ifdef ENABLE_WATCHDOG
+   // Reset watchdog, because the loop is running OK.
+   Watchdog.reset();
+#endif
 }
 
 /**
@@ -213,16 +246,13 @@ void showStartScreen()
  */
 void showHome()
 {
-   lcd.setCursor(0, 0);
-   lcd.print("F=");
    printFreq();
 
    printOutputStat();
 
    printChannel();
 
-   lcd.setCursor(13, 1);
-   lcd.print(waveformStr[settings.waveform[settings.channel]]);
+   printWaveform();
 }
 
 /**
@@ -255,15 +285,16 @@ void showMenu()
  */
 void showSetting()
 {
+   Waveform curWaveform = settings.waveform[settings.channel];
+   unsigned short len = sizeof(channelStr) / sizeof(char *);
+
    switch (curMenuSel)
    {
-   case 0:
+   case MenuItem::Function:
       lcd.setCursor(0, 0);
       lcd.print(waveformStr[0]);
       printOnCenter(waveformStr[1], 0);
       printOnRight(waveformStr[2], 0);
-
-      Waveform curWaveform = settings.waveform[settings.channel];
 
       if (curWaveform == 0)
          lcd.setCursor(0, 0);
@@ -275,25 +306,20 @@ void showSetting()
       lcd.blink();
 
       break;
-   case 1:
-      unsigned short len = sizeof(channelStr) / sizeof(char *);
+   case MenuItem::Frequency:
+      printFreq();
+      printStep();
 
-      for (int i = 0; i < len; i++)
-      {
-         lcd.setCursor(0, i);
-         lcd.print(channelStr[i]);
-         lcd.print(" ");
-         lcd.print(settings.frequency[i]);
-         lcd.print(" ");
-         lcd.print(freqUnit);
-      }
-
-      lcd.setCursor(0, 0);
+      lcd.setCursor(0, curRow);
       lcd.blink();
 
       break;
-   case 3:
-      printOnCenter((char *)verStr, 0);
+   case MenuItem::Phase:
+      printOnCenter("N/A", 0);
+
+      break;
+   case MenuItem::Version:
+      printOnCenter(verStr, 0);
 
       break;
    }
@@ -330,6 +356,9 @@ void updateDisplay()
  */
 void printFreq()
 {
+   lcd.setCursor(0, 0);
+   lcd.print("F=");
+
    for (int i = 2; i < 11; i++)
    {
       lcd.setCursor(i, 0);
@@ -339,6 +368,13 @@ void printFreq()
    lcd.setCursor(2, 0);
    lcd.print(settings.frequency[settings.channel]);
    lcd.print(freqUnit);
+}
+
+void printStep()
+{
+   lcd.setCursor(0, 1);
+   lcd.print("S=");
+   lcd.print(settings.freqStep);
 }
 
 /**
@@ -372,6 +408,15 @@ void printChannel()
 }
 
 /**
+ * Print the waveform for currently selected channel on main screen
+ */
+void printWaveform()
+{
+   lcd.setCursor(13, 1);
+   lcd.print(waveformStr[settings.waveform[settings.channel]]);
+}
+
+/**
  * Interrupt handler function for encoder
  */
 void checkPosition()
@@ -387,10 +432,10 @@ void encPress()
    switch (curDispFrame)
    {
    case HOME_PAGE:
-      outputStat = !outputStat;
+      outputStat = (OutputStatus) !(bool)outputStat;
 
-      // Turn the AD9833 module on or off
-      sigGen.setModeSD(outputStat ? MD_AD9833::MODE_ON : MD_AD9833::MODE_OFF); 
+      if (outputStat == OFF)
+         sigGen.setMode(MD_AD9833::mode_t::MODE_OFF);
       printOutputStat();
 
       break;
@@ -400,8 +445,21 @@ void encPress()
 
       break;
    case SETTING:
-      curDispFrame = HOME_PAGE;
-      isDispDirty = 1;
+      switch (curMenuSel)
+      {
+      case Frequency:
+         curRow = !curRow;
+
+         lcd.setCursor(0, curRow);
+         lcd.blink();
+
+         break;
+      default:
+         curDispFrame = MENU;
+         isDispDirty = 1;
+
+         break;
+      }
 
       break;
    }
@@ -419,6 +477,7 @@ void encDoublePress()
 
       printFreq();
       printChannel();
+      printWaveform();
 
       break;
    }
@@ -436,7 +495,20 @@ void encLongPress()
 
       break;
    case MENU:
+      // Reset menu selection
+      curMenuSel = (MenuItem)0;
       curDispFrame = HOME_PAGE;
+
+      break;
+   case SETTING:
+      switch (curMenuSel)
+      {
+      case Frequency:
+         curDispFrame = MENU;
+         curRow = 0;
+
+         break;
+      }
 
       break;
    }
@@ -451,116 +523,151 @@ void encRotate()
 {
    RotaryEncoder::Direction rotDir = enc.getDirection();
 
-   // Set a pointer to the frequency for the current channel
-   long *curFreq = &settings.frequency[settings.channel];
-
-   if (curDispFrame == HOME_PAGE)
+   switch (curDispFrame)
    {
-      if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
-      {
-         long newFreq = *curFreq + encFreqStep;
+   case HOME_PAGE:
+      changeFreq(rotDir);
 
-         if (newFreq < maxFreq)
-            *curFreq = newFreq;
-         else
-            *curFreq = maxFreq;
-      }
-      else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
-      {
-         long newFreq = *curFreq - encFreqStep;
+      break;
+   case MENU:
+      changeMenu(rotDir);
 
-         if (newFreq > 0)
-            *curFreq = newFreq;
-         else
-            *curFreq = 0;
-      }
+      break;
+   case SETTING:
+      handleSettingChange(rotDir);
 
-      if (curFreq != maxFreq || curFreq != 0)
-         printFreq();
+      break;
    }
-   else if (curDispFrame == MENU)
+}
+
+/**
+ * Change frequency of currently selected channel when encoder is rotated.
+ *
+ * @param rotDir Direction of rotation of encoder
+ */
+void changeFreq(RotaryEncoder::Direction rotDir)
+{
+   unsigned long *curFreq = &settings.frequency[settings.channel];
+
+   if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
    {
-      unsigned int arrLen = sizeof(menuItmStr) / sizeof(char *);
-
-      if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
-      {
-         if (curMenuSel < arrLen - 1)
-            curMenuSel = (MenuItem)(curMenuSel + 1);
-         else
-            curMenuSel = (MenuItem)(arrLen - 1);
-      }
-      else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
-      {
-         if (curMenuSel > 0)
-            curMenuSel = (MenuItem)(curMenuSel + 1);
-         else
-            curMenuSel = Function;
-      }
-
-      isDispDirty = 1;
+      long newFreq = *curFreq + settings.freqStep;
+      *curFreq = newFreq < maxFreq ? newFreq : maxFreq;
    }
-   else if (curDispFrame == SETTING)
+   else if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
    {
-      switch (curMenuSel)
-      {
-      case Function:
-         // Fetch the waveform for the current channel
-         Waveform curWaveform = settings.waveform[settings.channel];
+      long newFreq = *curFreq - settings.freqStep;
+      *curFreq = newFreq > 0 ? newFreq : settings.freqStep;
+   }
 
-         if (curWaveform == SIN)
-         {
-            if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
-            {
-               lcd.setCursor(7, 0);
-               lcd.blink();
+   printFreq();
+}
 
-               curWaveform = CLK;
-            }
-            else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
-            {
-               lcd.setCursor(13, 0);
-               lcd.blink();
+void changeStep(RotaryEncoder::Direction rotDir)
+{
+   unsigned long *curStep = &settings.freqStep;
+   unsigned int idc = log10(*curStep);
 
-               curWaveform = TRI;
-            }
-         }
-         else if (curWaveform == CLK)
-         {
-            if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
-            {
-               lcd.setCursor(13, 0);
-               lcd.blink();
+   if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
+      idc = idc < log10(maxFreqStep) ? idc + 1 : log10(maxFreqStep);
+   else
+      idc = idc > 1 ? idc - 1 : 0;
 
-               curWaveform = TRI;
-            }
-            else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
-            {
-               lcd.setCursor(0, 0);
-               lcd.blink();
+   *curStep = round(pow(10, idc));
 
-               curWaveform = SIN;
-            }
-         }
-         else
-         {
-            if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
-            {
-               lcd.setCursor(0, 0);
-               lcd.blink();
+   printStep();
+}
 
-               curWaveform = SIN;
-            }
-            else if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
-            {
-               lcd.setCursor(7, 0);
-               lcd.blink();
+/**
+ * Change selected menu item on encoder rotation
+ *
+ * @param rotDir Direction of rotation of encoder
+ */
+void changeMenu(RotaryEncoder::Direction rotDir)
+{
+   unsigned int arrLen = sizeof(menuItmStr) / sizeof(char *);
 
-               curWaveform = CLK;
-            }
-         }
+   if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
+   {
+      if (curMenuSel < arrLen - 1)
+         curMenuSel = (MenuItem)(curMenuSel + 1);
+      else
+         curMenuSel = Version;
+   }
+   else if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
+   {
+      if (curMenuSel > 0)
+         curMenuSel = (MenuItem)(curMenuSel - 1);
+      else
+         curMenuSel = Function;
+   }
 
-         break;
-      }
+   isDispDirty = 1;
+}
+
+/**
+ * Handle menu item settings change
+ *
+ * @param rotDir Direction of rotation of encoder
+ */
+void handleSettingChange(RotaryEncoder::Direction rotDir)
+{
+   // Fetch the waveform for the current channel
+   Waveform *curWaveform = &settings.waveform[settings.channel];
+   unsigned short len = sizeof(waveformStr) / sizeof(char *);
+
+   switch (curMenuSel)
+   {
+   case Function:
+
+      if (rotDir == RotaryEncoder::Direction::CLOCKWISE)
+         *curWaveform = *curWaveform + 1 < len ? *curWaveform + 1 : 0;
+
+      else if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
+         *curWaveform = *curWaveform > 0 ? *curWaveform - 1 : len - 1;
+
+      Serial.println(settings.waveform[0]);
+      Serial.println(settings.waveform[1]);
+
+      setWaveform(curWaveform);
+
+      break;
+   case Frequency:
+      if (curRow == 0)
+         changeFreq(rotDir);
+      else
+         changeStep(rotDir);
+
+      lcd.setCursor(0, curRow);
+
+      break;
+   }
+}
+
+/**
+ * Emulate the waveform selection by blinking cursor on the appropriate choice
+ *
+ * @param newWaveform Waveform on which the cursor should blink
+ */
+void setWaveform(Waveform *newWaveform)
+{
+   switch (*newWaveform)
+   {
+   case SIN:
+      lcd.setCursor(0, 0);
+      lcd.blink();
+
+      break;
+   case CLK:
+      lcd.setCursor(7, 0);
+      lcd.blink();
+
+      break;
+   case TRI:
+      lcd.setCursor(13, 0);
+      lcd.blink();
+
+      break;
    }
 }
 
@@ -718,13 +825,29 @@ void setADChannel(const bool channel)
 }
 
 /**
- * Apply the current settings to the AD9833 device
+ * Prints the reset message on the given line
  *
+ * @param line Line on which the error message is printed
  */
-void applyCurrentSettings()
+void printResetMsg(const byte line)
 {
-   setADFreq(0, settings.frequency[0]);
-   setADFreq(1, settings.frequency[1]);
-   setADSigMode(settings.waveform[settings.channel]);
-   setADChannel(settings.channel);
+   lcd.setCursor(0, line);
+   lcd.print(F("Reset to default"));
+}
+
+/**
+ * Reset settings to default
+ */
+void resetSettings()
+{
+   printResetMsg(0);
+
+   settings.frequency[0] = channelFreqs[0];
+   settings.frequency[0] = channelFreqs[1];
+   settings.freqStep = encFreqStep;
+   settings.waveform[0] = SIN;
+   settings.waveform[1] = SIN;
+   settings.channel = false;
+
+   blinkDisplayBacklight(3);
 }

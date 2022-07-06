@@ -374,6 +374,14 @@ void printStep()
 {
    lcd.setCursor(0, 1);
    lcd.print("S=");
+
+   for (int i = 2; i < 8; i++)
+   {
+      lcd.setCursor(i, 1);
+      lcd.print(" ");
+   }
+
+   lcd.setCursor(2, 1);
    lcd.print(settings.freqStep);
 }
 
@@ -563,6 +571,11 @@ void changeFreq(RotaryEncoder::Direction rotDir)
    printFreq();
 }
 
+/**
+ * Change frequency step
+ *
+ * @param rotDir Direction of rotation of encoder
+ */
 void changeStep(RotaryEncoder::Direction rotDir)
 {
    unsigned long *curStep = &settings.freqStep;
@@ -625,9 +638,6 @@ void handleSettingChange(RotaryEncoder::Direction rotDir)
 
       else if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
          *curWaveform = *curWaveform > 0 ? *curWaveform - 1 : len - 1;
-
-      Serial.println(settings.waveform[0]);
-      Serial.println(settings.waveform[1]);
 
       setWaveform(curWaveform);
 

@@ -40,8 +40,8 @@
 #include <avr/wdt.h>
 #endif
 
-#define ROT_A 2
-#define ROT_B 3
+#define ROT_A 3
+#define ROT_B 2
 #define ROT_PB 4
 
 #define FSYNC 10
@@ -67,7 +67,11 @@ unsigned int encFreqStep = 1000;
 // Whether the display needs to be redrawn
 // Only used if the entire screen needs a refresh,
 // otherwise individual areas are seperately updated.
-unsigned char isDispDirty = 1;
+bool isDispDirty = 1;
+
+// Whether the output frequency of the AD9833 module should be update or not.
+// Only activate if RUNNINIG_FREQUENCY is defined.
+bool isFrequencyDirty = 1;
 
 enum Waveform : byte
 {
@@ -102,10 +106,10 @@ const char *waveformStr[3] = {EP(SIN), EP(CLK), EP(TRI)};
 const char *outputStatStr[2] = {EP(OFF), EP(ON)};
 const char *menuItmStr[4] = {EP(Function), EP(Frequency), EP(Phase), EP(Version)};
 const char *channelStr[2] = {"CH-1", "CH-2"};
-const unsigned long channelFreqs[2] = {10000, 500000};
+const unsigned long channelFreqs[2] = {10000, 1000};
 
 // Whether function output is turned on
-OutputStatus outputStat = OFF;
+OutputStatus outputStat = ON;
 
 // Currently selected menu item
 MenuItem curMenuSel = Function;
@@ -132,13 +136,13 @@ struct Settings
 {
    unsigned long frequency[2];
    unsigned long freqStep;
-   Waveform waveform[2];
+   Waveform waveform;
    bool channel;
    byte checksum;
 #ifdef ENABLE_EEPROM
 } settings;
 #else
-} settings = {channelFreqs[0], channelFreqs[1], encFreqStep, SIN, SIN, 0, 0};
+} settings = {channelFreqs[0], channelFreqs[1], encFreqStep, SIN, 0, 0};
 #endif
 
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
@@ -183,17 +187,17 @@ void setup()
       resetSettings();
       writeToEEPROM();
    }
-
-   setADFreq(0, settings.frequency[0]);
-   setADFreq(1, settings.frequency[1]);
-   setADSigMode(settings.waveform[settings.channel]);
-   setADChannel(settings.channel);
 #endif
 
    showStartScreen();
 
    sigGen.begin();
 
+   setADFreq(0, settings.frequency[0]);
+   setADFreq(1, settings.frequency[1]);
+   setADChannel(settings.channel);
+
+   toggleOutput();
 #ifdef ENABLE_WATCHDOG
    // Enable watchdog with 2s timeout
    Watchdog.enable(RESET_MODE, WDT_PRESCALER_256);
@@ -205,6 +209,17 @@ void setup()
 void loop()
 {
    encBtn.tick();
+
+#ifdef RUNNING_FREQUENCY
+   if (isFrequencyDirty)
+   {
+      if (millis() - lastFreqUpdate > freqUpdateDelay)
+      {
+         setADFreq(settings.channel, settings.frequency[settings.channel]);
+         isFrequencyDirty = false;
+      }
+   }
+#endif
 
    static int encPos = 0;
    int newPos = enc.getPosition();
@@ -285,7 +300,7 @@ void showMenu()
  */
 void showSetting()
 {
-   Waveform curWaveform = settings.waveform[settings.channel];
+   Waveform curWaveform = settings.waveform;
    unsigned short len = sizeof(channelStr) / sizeof(char *);
 
    switch (curMenuSel)
@@ -421,7 +436,7 @@ void printChannel()
 void printWaveform()
 {
    lcd.setCursor(13, 1);
-   lcd.print(waveformStr[settings.waveform[settings.channel]]);
+   lcd.print(waveformStr[settings.waveform]);
 }
 
 /**
@@ -440,10 +455,7 @@ void encPress()
    switch (curDispFrame)
    {
    case HOME_PAGE:
-      outputStat = (OutputStatus) !(bool)outputStat;
-
-      if (outputStat == OFF)
-         sigGen.setMode(MD_AD9833::mode_t::MODE_OFF);
+      toggleOutput();
       printOutputStat();
 
       break;
@@ -482,6 +494,8 @@ void encDoublePress()
    {
    case HOME_PAGE:
       settings.channel = !settings.channel;
+
+      setADChannel(settings.channel);
 
       printFreq();
       printChannel();
@@ -568,6 +582,11 @@ void changeFreq(RotaryEncoder::Direction rotDir)
       *curFreq = newFreq > 0 ? newFreq : settings.freqStep;
    }
 
+#ifdef RUNNING_FREQUENCY
+   lastFreqUpdate = millis();
+   isFrequencyDirty = true;
+#endif
+
    printFreq();
 }
 
@@ -626,7 +645,7 @@ void changeMenu(RotaryEncoder::Direction rotDir)
 void handleSettingChange(RotaryEncoder::Direction rotDir)
 {
    // Fetch the waveform for the current channel
-   Waveform *curWaveform = &settings.waveform[settings.channel];
+   Waveform *curWaveform = &settings.waveform;
    unsigned short len = sizeof(waveformStr) / sizeof(char *);
 
    switch (curMenuSel)
@@ -639,6 +658,7 @@ void handleSettingChange(RotaryEncoder::Direction rotDir)
       else if (rotDir == RotaryEncoder::Direction::COUNTERCLOCKWISE)
          *curWaveform = *curWaveform > 0 ? *curWaveform - 1 : len - 1;
 
+      toggleOutput();
       setWaveform(curWaveform);
 
       break;
@@ -655,7 +675,8 @@ void handleSettingChange(RotaryEncoder::Direction rotDir)
 }
 
 /**
- * Emulate the waveform selection by blinking cursor on the appropriate choice
+ * Emulate the selection by blinking cursor on the appropriate choice
+ * and set waveform on generator.
  *
  * @param newWaveform Waveform on which the cursor should blink
  */
@@ -679,6 +700,19 @@ void setWaveform(Waveform *newWaveform)
 
       break;
    }
+}
+
+/**
+ * Toggle the output status of the AD9833 module.
+ */
+void toggleOutput()
+{
+   outputStat = (OutputStatus) !(bool)outputStat;
+
+   if (outputStat == OFF)
+      sigGen.setMode(MD_AD9833::mode_t::MODE_OFF);
+   else
+      setADSigMode(settings.waveform);
 }
 
 /**
@@ -855,8 +889,7 @@ void resetSettings()
    settings.frequency[0] = channelFreqs[0];
    settings.frequency[0] = channelFreqs[1];
    settings.freqStep = encFreqStep;
-   settings.waveform[0] = SIN;
-   settings.waveform[1] = SIN;
+   settings.waveform = CLK;
    settings.channel = false;
 
    blinkDisplayBacklight(3);
